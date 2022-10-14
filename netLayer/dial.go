@@ -14,7 +14,16 @@ var (
 	CustomDialerMap = make(map[string]func(address string, timeout time.Duration) (net.Conn, error))
 )
 
-func (a *Addr) Dial() (net.Conn, error) {
+const (
+	defaultDialTimeout = time.Second * 8 //作为对照，v2ray默认是16秒
+)
+
+//Dial 可以拨号tcp、udp、unix domain socket、tls 这几种协议。
+//如果不是这几种之一，则会尝试查询 CustomDialerMap 找出匹配的函数进行拨号。
+//如果找不到，则会使用net包的方法进行拨号（其会返回错误）。
+//
+//localAddr可为nil，如果不为nil，则其为 为 拨号 所指定的 本地地址。
+func (a *Addr) Dial(sockopt *Sockopt, localAddr net.Addr) (net.Conn, error) {
 	var istls bool
 	var resultConn net.Conn
 	var err error
@@ -31,11 +40,22 @@ func (a *Addr) Dial() (net.Conn, error) {
 	case "udp", "udp4", "udp6":
 		ua := a.ToUDPAddr()
 
-		if weKnowThatWeDontHaveIPV6 && a.IP.To4() == nil {
-			return nil, ErrMachineCantConnectToIpv6
+		if sockopt == nil && localAddr == nil {
+
+			return DialUDP(ua)
+		} else {
+
+			var c net.Conn
+			c, err = a.DialWithOpt(sockopt, localAddr)
+			if err == nil {
+				uc := c.(*net.UDPConn)
+				return NewUDPConn(ua, uc, true), nil
+			} else {
+				return nil, err
+			}
+
 		}
 
-		return DialUDP(ua)
 	default:
 		if len(CustomDialerMap) > 0 {
 			if f := CustomDialerMap[n]; f != nil {
@@ -49,52 +69,53 @@ func (a *Addr) Dial() (net.Conn, error) {
 
 tcp:
 
-	//本以为直接用 DialTCP 可以加速拨号，结果发现go官方包内部依然还是把地址转换回字符串再拨号
-
 	if a.IP != nil {
-		if a.IP.To4() == nil {
-			if weKnowThatWeDontHaveIPV6 {
-				return nil, ErrMachineCantConnectToIpv6
-			} else {
 
-				tcpConn, err2 := net.DialTCP("tcp6", nil, &net.TCPAddr{
-					IP:   a.IP,
-					Port: a.Port,
-				})
+		var tcpConn *net.TCPConn
 
-				if err2 == nil {
-					tcpConn.SetWriteBuffer(utils.MaxPacketLen) //有时不设置writebuffer时，会遇到 write: no buffer space available 错误, 在实现vmess的 ChunkMasking 时 遇到了该问题。
-
-				}
-
-				resultConn, err = tcpConn, err2
-				goto dialedPart
-			}
-		} else {
-
-			tcpConn, err2 := net.DialTCP("tcp4", nil, &net.TCPAddr{
+		if sockopt == nil && localAddr == nil {
+			tcpConn, err = net.DialTCP("tcp", nil, &net.TCPAddr{
 				IP:   a.IP,
 				Port: a.Port,
 			})
-
-			if err2 == nil {
-				tcpConn.SetWriteBuffer(utils.MaxPacketLen)
-
+		} else {
+			var c net.Conn
+			c, err = a.DialWithOpt(sockopt, localAddr)
+			if err == nil {
+				tcpConn = c.(*net.TCPConn)
 			}
-
-			resultConn, err = tcpConn, err2
-
-			goto dialedPart
 		}
+
+		if err == nil {
+			tcpConn.SetWriteBuffer(utils.MaxPacketLen) //有时不设置writebuffer时，会遇到 write: no buffer space available 错误, 在实现vmess的 ChunkMasking 时 遇到了该问题。
+
+		}
+
+		resultConn = tcpConn
+		goto dialedPart
 
 	}
 
 defaultPart:
 	if istls {
-		resultConn, err = net.DialTimeout("tcp", a.String(), time.Second*15)
+		//若tls到达了这里，则说明a的ip没有给出，而只给出了域名，所以上面tcp部分没有直接拨号
+
+		if sockopt == nil && localAddr == nil {
+			resultConn, err = net.DialTimeout("tcp", a.String(), defaultDialTimeout)
+
+		} else {
+			newA := *a
+			newA.Network = "tcp"
+			resultConn, err = newA.DialWithOpt(sockopt, localAddr)
+		}
 
 	} else {
-		resultConn, err = net.DialTimeout(a.Network, a.String(), time.Second*15)
+		//一般情况下，unix domain socket 会到达这里，其他情况则都被前面代码捕获到了
+		if sockopt == nil {
+			resultConn, err = net.DialTimeout(a.Network, a.String(), defaultDialTimeout)
+		} else {
+			resultConn, err = a.DialWithOpt(sockopt, localAddr)
+		}
 
 	}
 
@@ -117,16 +138,46 @@ dialedPart:
 
 }
 
-func (a Addr) DialWithOpt(sockopt *Sockopt) (net.Conn, error) {
+//比Dial更低级的方法，专用于使用sockopt的情况。
+//a的Network只能为golang支持的那几种。
+func (a Addr) DialWithOpt(sockopt *Sockopt, localAddr net.Addr) (net.Conn, error) {
 
 	dialer := &net.Dialer{
-		Timeout: time.Second * 8, //v2ray默认16秒，是不是太长了？？
+		Timeout: defaultDialTimeout,
 	}
-	dialer.Control = func(network, address string, c syscall.RawConn) error {
-		return c.Control(func(fd uintptr) {
-			SetSockOpt(int(fd), sockopt, a.IsUDP(), a.IsIpv6())
+	if localAddr != nil {
+		dialer.LocalAddr = localAddr
 
-		})
+		//localAddr一般用于指定ipv4或者ipv6出站，所以我们这里标注一下。
+		switch a.Network {
+		case "tcp":
+			if ta, ok := localAddr.(*net.TCPAddr); ok {
+
+				//ipv6
+				if ta.IP.To4() == nil {
+					a.Network = "tcp6"
+				} else {
+					a.Network = "tcp4"
+				}
+			}
+		case "udp":
+			if ta, ok := localAddr.(*net.UDPAddr); ok {
+
+				if ta.IP.To4() == nil {
+					a.Network = "udp6"
+				} else {
+					a.Network = "udp4"
+				}
+			}
+		}
+	}
+	if sockopt != nil {
+		dialer.Control = func(network, address string, c syscall.RawConn) error {
+			return c.Control(func(fd uintptr) {
+				SetSockOpt(int(fd), sockopt, a.IsUDP(), a.IsIpv6())
+
+			})
+		}
 	}
 
 	return dialer.Dial(a.Network, a.String())

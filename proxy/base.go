@@ -3,6 +3,7 @@ package proxy
 import (
 	"crypto/tls"
 	"io"
+	"net"
 	"strings"
 	"sync"
 
@@ -86,6 +87,7 @@ type Base struct {
 	DialConf   *DialConf
 
 	Addr           string
+	LA             net.Addr //for client's LocalAddr
 	TLS            bool
 	Tag            string //可用于路由, 见 netLayer.route.go
 	TransportLayer string
@@ -122,6 +124,10 @@ func (b *Base) Network() string {
 	return b.TransportLayer
 }
 
+func (b *Base) LocalAddr() net.Addr {
+	return b.LA
+}
+
 func (b *Base) GetXver() int {
 	return b.Xver
 }
@@ -144,14 +150,15 @@ func (b *Base) MiddleName() string {
 			sb.WriteString("+lazy")
 		}
 	}
+	advL := b.AdvancedL
 	if b.Header != nil {
-		if b.AdvancedL != "ws" {
+		if advL != "ws" && advL != "grpc" {
 			sb.WriteString("+http")
 		}
 	}
-	if b.AdvancedL != "" {
+	if advL != "" {
 		sb.WriteString("+")
-		sb.WriteString(b.AdvancedL)
+		sb.WriteString(advL)
 	}
 	sb.WriteString("+")
 	return sb.String()
@@ -385,7 +392,7 @@ func (b *Base) InitAdvLayer() {
 		advClient, err := creator.NewClientFromConf(aConf)
 		if err != nil {
 
-			if ce := utils.CanLogErr("InitAdvLayer client failed "); ce != nil {
+			if ce := utils.CanLogErr("Failed in InitAdvLayer client"); ce != nil {
 				ce.Write(
 					zap.String("protocol", b.AdvancedL),
 					zap.Error(err),
@@ -428,7 +435,7 @@ func (b *Base) InitAdvLayer() {
 		advSer, err := creator.NewServerFromConf(aConf)
 		if err != nil {
 
-			if ce := utils.CanLogErr("InitAdvLayer server failed "); ce != nil {
+			if ce := utils.CanLogErr("Failed in InitAdvLayer server"); ce != nil {
 				ce.Write(
 					zap.String("protocol", b.AdvancedL),
 					zap.Error(err),

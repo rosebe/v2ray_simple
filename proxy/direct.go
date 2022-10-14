@@ -38,7 +38,11 @@ func (*DirectClient) Name() string { return DirectName }
 func (d *DirectClient) Handshake(underlay net.Conn, firstPayload []byte, target netLayer.Addr) (result io.ReadWriteCloser, err error) {
 
 	if underlay == nil {
-		result, err = target.Dial()
+		if d.Sockopt != nil {
+			result, err = target.DialWithOpt(d.Sockopt, d.LA)
+		} else {
+			result, err = target.Dial(nil, d.LA)
+		}
 
 	} else {
 		result = underlay
@@ -48,7 +52,7 @@ func (d *DirectClient) Handshake(underlay net.Conn, firstPayload []byte, target 
 		return
 	}
 	if len(firstPayload) > 0 {
-		_, err = underlay.Write(firstPayload)
+		_, err = result.Write(firstPayload)
 		utils.PutBytes(firstPayload)
 
 	}
@@ -60,10 +64,10 @@ func (d *DirectClient) Handshake(underlay net.Conn, firstPayload []byte, target 
 //direct的Client的 EstablishUDPChannel 直接 监听一个udp端口，无视传入的net.Conn.
 func (d *DirectClient) EstablishUDPChannel(_ net.Conn, firstPayload []byte, target netLayer.Addr) (netLayer.MsgConn, error) {
 	if len(firstPayload) == 0 {
-		return netLayer.NewUDPMsgConn(nil, d.IsFullcone, false)
+		return netLayer.NewUDPMsgConn(nil, d.IsFullcone, false, d.Sockopt)
 
 	} else {
-		mc, err := netLayer.NewUDPMsgConn(nil, d.IsFullcone, false)
+		mc, err := netLayer.NewUDPMsgConn(nil, d.IsFullcone, false, d.Sockopt)
 		if err != nil {
 			return nil, err
 		}

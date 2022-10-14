@@ -76,7 +76,7 @@ func NewClient(dc *DialConf) (Client, error) {
 			return newclient(creator, dc, true)
 		}
 	}
-	return nil, utils.ErrInErr{ErrDesc: "unknown client protocol ", Data: protocol}
+	return nil, utils.ErrInErr{ErrDesc: "Unknown client protocol ", Data: protocol}
 
 }
 
@@ -92,6 +92,16 @@ func newclient(creator ClientCreator, dc *DialConf, knownTls bool) (Client, erro
 	if dc.TLS || knownTls {
 		c.GetBase().TLS = true
 		e = prepareTLS_forClient(c, dc)
+	}
+	if dc.SendThrough != "" {
+		st, err := netLayer.StrToNetAddr(c.Network(), dc.SendThrough)
+		if err != nil {
+			return nil, utils.ErrInErr{ErrDesc: "parse sendthrough ip failed", ErrDetail: err}
+
+		} else {
+			c.GetBase().LA = st
+
+		}
 	}
 	return c, e
 
@@ -128,7 +138,7 @@ func NewServer(lc *ListenConf) (Server, error) {
 		}
 	}
 
-	return nil, utils.ErrInErr{ErrDesc: "unknown server protocol ", Data: protocol}
+	return nil, utils.ErrInErr{ErrDesc: "Unknown server protocol ", Data: protocol}
 }
 
 func newserver(creator ServerCreator, lc *ListenConf, knownTls bool) (Server, error) {
@@ -145,7 +155,7 @@ func newserver(creator ServerCreator, lc *ListenConf, knownTls bool) (Server, er
 		ser.GetBase().TLS = true
 		err = prepareTLS_forServer(ser, lc)
 		if err != nil {
-			return nil, utils.ErrInErr{ErrDesc: "prepareTLS failed", ErrDetail: err}
+			return nil, utils.ErrInErr{ErrDesc: "Failed, prepareTLS", ErrDetail: err}
 
 		}
 	}
@@ -169,7 +179,7 @@ func configCommonForServer(ser BaseInterface, lc *ListenConf) error {
 		fa, err := netLayer.NewAddrFromAny(fallbackThing)
 
 		if err != nil {
-			return utils.ErrInErr{ErrDesc: "configCommonURLQueryForServer failed", Data: fallbackThing}
+			return utils.ErrInErr{ErrDesc: "Failed, configCommonURLQueryForServer", Data: fallbackThing}
 
 		}
 
